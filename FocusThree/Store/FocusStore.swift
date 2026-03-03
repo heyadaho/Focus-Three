@@ -62,7 +62,10 @@ final class FocusStore {
     /// Reorder active items after a drag-and-drop in the Edit modal.
     func moveItems(from source: IndexSet, to destination: Int, items: [FocusItem], context: ModelContext) {
         var reordered = items
-        reordered.move(fromOffsets: source, toOffset: destination)
+        let moving = source.map { reordered[$0] }
+        for index in source.sorted().reversed() { reordered.remove(at: index) }
+        let adjustedDest = destination - source.filter { $0 < destination }.count
+        reordered.insert(contentsOf: moving, at: max(0, min(adjustedDest, reordered.count)))
         normaliseOrder(reordered, context: context)
     }
 }

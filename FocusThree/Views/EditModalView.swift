@@ -93,7 +93,6 @@ struct EditModalView: View {
                     }
                 }
                 .listStyle(.inset)
-                .environment(\.editMode, .constant(.active))
             }
 
             Divider()
