@@ -7,11 +7,11 @@ struct MenuBarPopoverView: View {
     @Query(filter: #Predicate<FocusItem> { !$0.isComplete },
            sort: \FocusItem.order) private var activeItems: [FocusItem]
 
-    @State private var isAddingTask = false
-    @State private var newTaskText = ""
-    @FocusState private var addFieldFocused: Bool
+    var isPinned: Bool = false
 
-    private var topThree: [FocusItem] { Array(activeItems.prefix(3)) }
+    @State private var newTaskText = ""
+    @State private var showSuccess = false
+    @FocusState private var inputFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -22,103 +22,144 @@ struct MenuBarPopoverView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
+                Button {
+                    NotificationCenter.default.post(name: .togglePinnedWindow, object: nil)
+                } label: {
+                    Image(systemName: isPinned ? "pin.fill" : "pin")
+                        .font(.caption)
+                        .foregroundStyle(isPinned ? .primary : .secondary)
+                }
+                .buttonStyle(.plain)
+                .help(isPinned ? "Return to menu bar" : "Pin to screen")
             }
+            .frame(height: 44)
             .padding(.horizontal, 16)
-            .padding(.vertical, 12)
 
             Divider()
 
-            // ── Top-3 items ──────────────────────────────────────
-            if topThree.isEmpty && !isAddingTask {
-                VStack(spacing: 8) {
-                    Text("No tasks yet.")
-                        .foregroundStyle(.secondary)
-                        .font(.callout)
-                    Button("Open task editor →") {
-                        NotificationCenter.default.post(name: .showEditModal, object: nil)
+            // ── Top-3 slots (always 3, order-based) ──────────────
+            VStack(spacing: 0) {
+                ForEach(0..<3, id: \.self) { slotIndex in
+                    if slotIndex > 0 {
+                        Divider().padding(.leading, 60)
                     }
-                    .buttonStyle(.link)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 24)
-            } else {
-                VStack(spacing: 0) {
-                    ForEach(topThree) { item in
+                    let slotItem = activeItems.first { $0.order == slotIndex }
+                    if let item = slotItem {
                         PriorityRowView(item: item)
-                        if item.order < topThree.count - 1 {
-                            Divider().padding(.leading, 44)
-                        }
-                    }
-
-                    // Inline add field
-                    if isAddingTask {
-                        if !topThree.isEmpty { Divider().padding(.leading, 44) }
-                        HStack(spacing: 10) {
-                            Image(systemName: "plus.circle")
-                                .foregroundStyle(.secondary)
-                                .font(.title3)
-                                .frame(width: 20)
-                            TextField("New task…", text: $newTaskText)
-                                .textFieldStyle(.plain)
-                                .focused($addFieldFocused)
-                                .onSubmit { commitNewTask() }
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
+                    } else {
+                        EmptySlotView(slotOrder: slotIndex)
                     }
                 }
             }
+
+            Divider()
+
+            // ── Always-visible add area ───────────────────────────
+            HStack {
+                if showSuccess {
+                    Text("Added to your list ✓")
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    TextField("Add a task…", text: $newTaskText)
+                        .textFieldStyle(.plain)
+                        .focused($inputFocused)
+                        .onSubmit { commitAdd() }
+                    if !newTaskText.isEmpty {
+                        Button("Add") { commitAdd() }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                    }
+                }
+            }
+            .frame(height: 44)
+            .padding(.horizontal, 16)
 
             Divider()
 
             // ── Footer ───────────────────────────────────────────
-            HStack(spacing: 4) {
-                // Gear → Settings
-                Button {
-                    NotificationCenter.default.post(name: .showSettingsPanel, object: nil)
-                } label: {
-                    Image(systemName: "gearshape")
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .help("Settings")
-
-                Divider().frame(height: 14).padding(.horizontal, 4)
-
-                // Edit
-                Button("Edit") {
-                    NotificationCenter.default.post(name: .showEditModal, object: nil)
-                }
-                .buttonStyle(.plain)
-                .font(.callout)
-
-                Spacer()
-
-                // Add (+)
-                Button {
-                    isAddingTask = true
-                    addFieldFocused = true
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.callout.weight(.semibold))
-                }
-                .buttonStyle(.plain)
-                .help("Add task")
+            Button("Edit") {
+                NotificationCenter.default.post(name: .showEditModal, object: nil)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .buttonStyle(.plain)
+            .font(.callout)
+            .frame(height: 44)
+            .padding(.horizontal, 16)
         }
         .frame(width: 320)
-        .onChange(of: isAddingTask) { _, adding in
-            if !adding { newTaskText = "" }
-        }
     }
 
-    private func commitNewTask() {
+    private func commitAdd() {
         let trimmed = newTaskText.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { isAddingTask = false; return }
+        guard !trimmed.isEmpty else { return }
         store.addTask(text: trimmed, context: context)
         newTaskText = ""
-        isAddingTask = false
+        showSuccess = true
+        Task {
+            try? await Task.sleep(for: .milliseconds(1500))
+            showSuccess = false
+        }
+    }
+}
+
+// MARK: - Empty slot
+
+private struct EmptySlotView: View {
+    let slotOrder: Int
+
+    @Environment(\.modelContext) private var context
+    @Environment(FocusStore.self) private var store
+    @Query(filter: #Predicate<FocusItem> { !$0.isComplete },
+           sort: \FocusItem.order) private var allActive: [FocusItem]
+
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    private var upcomingItems: [FocusItem] { allActive.filter { $0.order >= 3 } }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "circle.dotted")
+                .foregroundStyle(.tertiary)
+                .font(.title3)
+                .frame(width: 32, height: 44)
+
+            TextField("New priority…", text: $text)
+                .textFieldStyle(.plain)
+                .focused($focused)
+                .foregroundStyle(.secondary)
+                .onSubmit { commit() }
+                .frame(maxWidth: .infinity)
+
+            if !upcomingItems.isEmpty {
+                Menu {
+                    ForEach(upcomingItems) { item in
+                        Button(item.text) {
+                            store.promoteToSlot(item, slotOrder: slotOrder, context: context)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "chevron.up.circle")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 44)
+            } else {
+                Color.clear.frame(width: 44, height: 44)
+            }
+        }
+        .frame(height: 44)
+        .padding(.horizontal, 16)
+    }
+
+    private func commit() {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        store.insertAtSlot(text: trimmed, slotOrder: slotOrder, context: context)
+        text = ""
     }
 }

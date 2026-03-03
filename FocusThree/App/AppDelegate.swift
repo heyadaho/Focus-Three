@@ -5,18 +5,21 @@ import SwiftUI
 // MARK: - Notification names
 
 extension Notification.Name {
-    static let showEditModal    = Notification.Name("com.edwardlake.focusthree.showEditModal")
-    static let showSettingsPanel = Notification.Name("com.edwardlake.focusthree.showSettings")
+    static let showEditModal      = Notification.Name("com.edwardlake.focusthree.showEditModal")
+    static let showSettingsPanel  = Notification.Name("com.edwardlake.focusthree.showSettings")
+    static let togglePinnedWindow = Notification.Name("com.edwardlake.focusthree.togglePinnedWindow")
 }
 
 // MARK: - AppDelegate
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var editWindow: NSWindow?
     private var settingsWindow: NSWindow?
+    private var pinnedWindow: NSWindow?
 
     // MARK: Lifecycle
 
@@ -32,6 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                name: .showEditModal, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(openSettingsPanel),
                                                name: .showSettingsPanel, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(togglePinnedWindow),
+                                               name: .togglePinnedWindow, object: nil)
 
         // Open Edit modal on first launch if there are no active tasks.
         Task {
@@ -124,6 +129,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             editWindow = window
         }
         editWindow?.orderFrontRegardless()
+    }
+
+    // MARK: - Pinned floating window
+
+    @objc func togglePinnedWindow() {
+        // If already pinned and visible, close it
+        if let existing = pinnedWindow, existing.isVisible {
+            existing.close()
+            pinnedWindow = nil
+            return
+        }
+
+        // Close the popover and create a floating always-on-top window
+        popover?.performClose(nil)
+
+        let view = MenuBarPopoverView(isPinned: true)
+            .modelContainer(sharedModelContainer)
+            .environment(FocusStore.shared)
+        let controller = NSHostingController(rootView: view)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 280),
+            styleMask: [.titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Focus Three"
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.isMovableByWindowBackground = true
+        window.titlebarAppearsTransparent = true
+        window.contentViewController = controller
+        window.isReleasedWhenClosed = false
+
+        // Position below the status bar button
+        if let button = statusItem?.button,
+           let buttonWindow = button.window {
+            let screenRect = buttonWindow.convertToScreen(button.frame)
+            window.setFrameTopLeftPoint(NSPoint(x: screenRect.minX,
+                                                y: screenRect.minY))
+        } else {
+            window.center()
+        }
+
+        pinnedWindow = window
+        window.orderFrontRegardless()
     }
 
     // MARK: - Settings panel

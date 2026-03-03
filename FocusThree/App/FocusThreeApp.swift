@@ -6,10 +6,10 @@ import SwiftData
 let sharedModelContainer: ModelContainer = {
     let appSupport = FileManager.default
         .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let storeURL = appSupport.appendingPathComponent("FocusThree_v2.store")
+    let storeURL = appSupport.appendingPathComponent("FocusThree_v3.store")
     do {
         let config = ModelConfiguration(url: storeURL)
-        return try ModelContainer(for: FocusItem.self, configurations: [config])
+        return try ModelContainer(for: FocusItem.self, configurations: config)
     } catch {
         fatalError("Could not create ModelContainer: \(error)")
     }

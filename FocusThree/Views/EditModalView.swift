@@ -52,44 +52,38 @@ struct EditModalView: View {
                 emptyState(message: "No tasks yet. Add one below.")
             } else {
                 List {
-                    // Top-3 section
-                    if activeItems.count > 0 {
-                        Section {
-                            ForEach(activeItems.prefix(3)) { item in
-                                taskRow(item)
+                    Section {
+                        ForEach(Array(activeItems.enumerated()), id: \.element.id) { index, item in
+                            // Inject "Upcoming tasks" divider at the first item with order ≥ 3
+                            VStack(spacing: 0) {
+                                if item.order >= 3 && (index == 0 || activeItems[index - 1].order < 3) {
+                                    HStack {
+                                        Text("Upcoming tasks")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 4)
+                                    .padding(.top, 16)
+                                    .padding(.bottom, 6)
+                                    Divider()
+                                }
+                                EditTaskRowView(item: item) {
+                                    store.deleteTask(item, context: context)
+                                }
                             }
-                            .onMove { from, to in
-                                store.moveItems(from: from, to: to,
-                                                items: Array(activeItems.prefix(3)),
-                                                context: context)
-                            }
-                        } header: {
-                            Text("Top 3 — shown in menu bar")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .textCase(nil)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
                         }
-                    }
-
-                    // Remaining tasks
-                    if activeItems.count > 3 {
-                        Section {
-                            ForEach(activeItems.dropFirst(3)) { item in
-                                taskRow(item)
-                            }
-                            .onMove { from, to in
-                                // Offset indices to account for the prefix(3) section.
-                                let offset = IndexSet(from.map { $0 + 3 })
-                                store.moveItems(from: offset, to: to + 3,
-                                                items: activeItems,
-                                                context: context)
-                            }
-                        } header: {
-                            Text("Other tasks")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .textCase(nil)
+                        .onMove { from, to in
+                            store.moveItems(from: from, to: to,
+                                            items: activeItems,
+                                            context: context)
                         }
+                    } header: {
+                        Text("Top 3 — shown in menu bar")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textCase(nil)
                     }
                 }
                 .listStyle(.inset)
@@ -120,7 +114,7 @@ struct EditModalView: View {
     // MARK: - Archive tab
 
     private var archiveTab: some View {
-        Group {
+        VStack(spacing: 0) {
             if archivedItems.isEmpty {
                 emptyState(message: "Completed tasks will appear here.")
             } else {
@@ -129,10 +123,17 @@ struct EditModalView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(item.text)
                                 .lineLimit(1)
-                            if let date = item.archivedAt {
-                                Text("Completed \(date.formatted(date: .abbreviated, time: .omitted))")
-                                    .font(.caption)
-                                    .foregroundStyle(.tertiary)
+                            HStack(spacing: 8) {
+                                if let date = item.archivedAt {
+                                    Text("Completed \(date.formatted(date: .abbreviated, time: .omitted))")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                if item.timeLoggedSeconds > 0 {
+                                    Text("· \(formatDuration(item.timeLoggedSeconds))")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
+                                }
                             }
                         }
                         Spacer()
@@ -143,7 +144,7 @@ struct EditModalView: View {
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(.secondary)
-                        .help("Restore to top of list")
+                        .help("Restore to upcoming list")
 
                         Button {
                             store.deleteTask(item, context: context)
@@ -157,28 +158,23 @@ struct EditModalView: View {
                     .padding(.vertical, 2)
                 }
                 .listStyle(.inset)
+
+                Divider()
+
+                HStack {
+                    Spacer()
+                    Button("Clear All", role: .destructive) {
+                        store.clearArchive(archivedItems, context: context)
+                    }
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
             }
         }
     }
 
     // MARK: - Helpers
-
-    private func taskRow(_ item: FocusItem) -> some View {
-        HStack {
-            Text(item.text)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Button {
-                store.deleteTask(item, context: context)
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Delete")
-        }
-        .padding(.vertical, 2)
-    }
 
     private func emptyState(message: String) -> some View {
         VStack {
@@ -212,5 +208,73 @@ struct EditModalView: View {
         store.addTask(text: trimmed, context: context)
         newTaskText = ""
         addFieldFocused = true
+    }
+
+    private func formatDuration(_ seconds: Int) -> String {
+        let h = seconds / 3600
+        let m = (seconds % 3600) / 60
+        let s = seconds % 60
+        if h > 0 { return "\(h)h \(m)m" }
+        if m > 0 { return "\(m)m \(s)s" }
+        return "\(s)s"
+    }
+}
+
+// MARK: - Editable task row
+
+private struct EditTaskRowView: View {
+    @Environment(\.modelContext) private var context
+    let item: FocusItem
+    let onDelete: () -> Void
+
+    @State private var isEditing = false
+    @State private var editText = ""
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            // Drag handle
+            Image(systemName: "line.3.horizontal")
+                .foregroundStyle(.tertiary)
+                .font(.caption)
+                .frame(width: 16)
+
+            // Task text / inline editor
+            if isEditing {
+                TextField("", text: $editText)
+                    .textFieldStyle(.plain)
+                    .focused($fieldFocused)
+                    .onSubmit { commitEdit() }
+                    .onExitCommand { cancelEdit() }
+            } else {
+                Text(item.text)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .gesture(TapGesture(count: 2).onEnded {
+                        editText = item.text
+                        isEditing = true
+                        fieldFocused = true
+                    })
+            }
+
+            // Delete
+            Button(action: onDelete) {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Delete")
+        }
+        .padding(.vertical, 8)
+    }
+
+    private func commitEdit() {
+        let trimmed = editText.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty { item.text = trimmed }
+        isEditing = false
+    }
+
+    private func cancelEdit() {
+        isEditing = false
     }
 }
