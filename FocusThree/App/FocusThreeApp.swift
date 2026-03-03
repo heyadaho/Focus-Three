@@ -2,9 +2,14 @@ import SwiftUI
 import SwiftData
 
 // Shared container — accessible from both App and AppDelegate.
+// Store is versioned so schema changes never require migration — just bump the suffix.
 let sharedModelContainer: ModelContainer = {
+    let appSupport = FileManager.default
+        .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+    let storeURL = appSupport.appendingPathComponent("FocusThree_v2.store")
     do {
-        return try ModelContainer(for: FocusItem.self)
+        let config = ModelConfiguration(url: storeURL)
+        return try ModelContainer(for: FocusItem.self, configurations: [config])
     } catch {
         fatalError("Could not create ModelContainer: \(error)")
     }

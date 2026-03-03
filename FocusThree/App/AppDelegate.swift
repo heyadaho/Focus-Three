@@ -22,8 +22,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        LoginItemManager.shared.registerOnFirstLaunch()
         setupStatusItem()
+        // Register login item on a background thread — SMAppService can block on first launch.
+        Task.detached(priority: .background) {
+            LoginItemManager.shared.registerOnFirstLaunch()
+        }
 
         NotificationCenter.default.addObserver(self, selector: #selector(openEditModal),
                                                name: .showEditModal, object: nil)
@@ -81,17 +84,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.performClose(nil)
         } else {
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             NSApp.activate(ignoringOtherApps: true)
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }
 
     private func showRightClickMenu() {
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettingsPanel), keyEquivalent: ","))
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettingsPanel), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit Focus Three", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        menu.items.forEach { $0.target = self }
+        let quitItem = NSMenuItem(title: "Quit Focus Three", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quitItem.target = NSApp
+        menu.addItem(quitItem)
         statusItem?.menu = menu
         statusItem?.button?.performClick(nil)
         // Remove the menu after display so left-click still fires our action.
@@ -117,8 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.isReleasedWhenClosed = false
             editWindow = window
         }
-        NSApp.activate(ignoringOtherApps: true)
-        editWindow?.makeKeyAndOrderFront(nil)
+        editWindow?.orderFrontRegardless()
     }
 
     // MARK: - Settings panel
@@ -136,7 +141,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.isReleasedWhenClosed = false
             settingsWindow = window
         }
-        NSApp.activate(ignoringOtherApps: true)
-        settingsWindow?.makeKeyAndOrderFront(nil)
+        settingsWindow?.orderFrontRegardless()
     }
 }
