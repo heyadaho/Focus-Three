@@ -10,6 +10,14 @@ extension Notification.Name {
     static let togglePinnedWindow = Notification.Name("com.edwardlake.focusthree.togglePinnedWindow")
 }
 
+// MARK: - FloatingPanel
+
+/// Borderless window subclass that can become key, enabling TextField input.
+final class FloatingPanel: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
 // MARK: - AppDelegate
 
 @MainActor
@@ -21,12 +29,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var pinnedWindow: NSWindow?
 
+    // MARK: Drag-to-detach state
+
+    private enum DragState {
+        /// Not tracking anything.
+        case idle
+        /// MouseDown in header; waiting for drag threshold.
+        case watchingHeader(startScreen: NSPoint)
+        /// Window created; moving it with the mouse.
+        case draggingWindow(window: NSWindow, offset: NSPoint)
+    }
+
+    private var dragState: DragState = .idle
+    private var dragMonitor: Any?
+
     // MARK: Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         setupStatusItem()
-        // Register login item on a background thread — SMAppService can block on first launch.
         Task.detached(priority: .background) {
             LoginItemManager.shared.registerOnFirstLaunch()
         }
@@ -38,14 +59,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(togglePinnedWindow),
                                                name: .togglePinnedWindow, object: nil)
 
-        // Open Edit modal on first launch if there are no active tasks.
         Task {
             try? await Task.sleep(for: .milliseconds(400))
             let context = sharedModelContainer.mainContext
             let all = (try? context.fetch(FetchDescriptor<FocusItem>())) ?? []
-            if all.filter({ !$0.isComplete }).isEmpty {
-                openEditModal()
-            }
+            if all.filter({ !$0.isComplete }).isEmpty { openEditModal() }
         }
     }
 
@@ -63,10 +81,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.target = self
         }
 
-        // Build the popover.
         let popover = NSPopover()
         popover.behavior = .transient
         popover.animates = true
+        popover.delegate = self
         popover.contentViewController = NSHostingController(
             rootView: MenuBarPopoverView()
                 .modelContainer(sharedModelContainer)
@@ -77,20 +95,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func handleStatusItemClick() {
         guard let event = NSApp.currentEvent else { return }
-        if event.type == .rightMouseUp {
-            showRightClickMenu()
-        } else {
-            togglePopover()
-        }
+        if event.type == .rightMouseUp { showRightClickMenu() } else { togglePopover() }
     }
 
     private func togglePopover() {
+        if let pinned = pinnedWindow, pinned.isVisible {
+            pinned.close()
+            pinnedWindow = nil
+            return
+        }
         guard let button = statusItem?.button, let popover else { return }
         if popover.isShown {
             popover.performClose(nil)
         } else {
             NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            DispatchQueue.main.async {
+                self.popover?.contentViewController?.view.window?.makeKey()
+                self.installDragMonitor()
+            }
         }
     }
 
@@ -105,8 +128,144 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quitItem)
         statusItem?.menu = menu
         statusItem?.button?.performClick(nil)
-        // Remove the menu after display so left-click still fires our action.
         DispatchQueue.main.async { self.statusItem?.menu = nil }
+    }
+
+    // MARK: - Drag-to-detach monitor
+
+    private func installDragMonitor() {
+        removeDragMonitor()
+        dragState = .idle
+
+        dragMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
+        ) { [weak self] event in
+            self?.handleDragEvent(event)
+            return event
+        }
+    }
+
+    private func removeDragMonitor() {
+        if let m = dragMonitor { NSEvent.removeMonitor(m); dragMonitor = nil }
+        dragState = .idle
+    }
+
+    @MainActor
+    private func handleDragEvent(_ event: NSEvent) {
+        switch event.type {
+
+        case .leftMouseDown:
+            if isEventInPopoverHeader(event) {
+                dragState = .watchingHeader(startScreen: NSEvent.mouseLocation)
+            } else {
+                dragState = .idle
+            }
+
+        case .leftMouseDragged:
+            switch dragState {
+
+            case .watchingHeader(let start):
+                let mouse = NSEvent.mouseLocation
+                let dx = mouse.x - start.x
+                let dy = mouse.y - start.y
+                // Only detach after 8pt of movement
+                guard sqrt(dx * dx + dy * dy) > 8 else { break }
+
+                guard let popover, popover.isShown else {
+                    dragState = .idle; break
+                }
+                popover.performClose(nil)
+
+                let window = makePinnedPanel()
+                // Top-left of window relative to current mouse position
+                let topLeft = NSPoint(x: mouse.x - 160, y: mouse.y + 22)
+                window.setFrameTopLeftPoint(topLeft)
+                pinnedWindow = window
+                window.makeKeyAndOrderFront(nil)
+
+                // Record fixed offset so window follows the cursor exactly
+                let offset = NSPoint(x: topLeft.x - mouse.x, y: topLeft.y - mouse.y)
+                dragState = .draggingWindow(window: window, offset: offset)
+
+            case .draggingWindow(let window, let offset):
+                let mouse = NSEvent.mouseLocation
+                window.setFrameTopLeftPoint(NSPoint(x: mouse.x + offset.x,
+                                                    y: mouse.y + offset.y))
+
+            default:
+                break
+            }
+
+        case .leftMouseUp:
+            // If we were moving a window, stop. Clean up monitor.
+            removeDragMonitor()
+
+        default:
+            break
+        }
+    }
+
+    /// Returns true when the mouse is in the top 44pt header of the popover.
+    /// Uses screen coordinates so it works regardless of which view has focus.
+    private func isEventInPopoverHeader(_ event: NSEvent) -> Bool {
+        guard let popoverWindow = popover?.contentViewController?.view.window,
+              popoverWindow.isVisible else { return false }
+
+        let mouse = NSEvent.mouseLocation   // screen coordinates
+        let frame = popoverWindow.frame     // screen coordinates
+        return frame.contains(mouse) && mouse.y >= (frame.maxY - 44)
+    }
+
+    // MARK: - Pinned floating window
+
+    @objc func togglePinnedWindow() {
+        if let existing = pinnedWindow, existing.isVisible {
+            existing.close()
+            pinnedWindow = nil
+            return
+        }
+        popover?.performClose(nil)
+
+        var topLeft: NSPoint = .zero
+        if let button = statusItem?.button, let bw = button.window {
+            let r = bw.convertToScreen(button.frame)
+            topLeft = NSPoint(x: r.minX, y: r.minY)
+        }
+        showPinnedWindow(topLeft: topLeft)
+    }
+
+    private func showPinnedWindow(topLeft: NSPoint) {
+        let window = makePinnedPanel()
+        window.setFrameTopLeftPoint(topLeft)
+        pinnedWindow = window
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func makePinnedPanel() -> FloatingPanel {
+        let view = MenuBarPopoverView(isPinned: true)
+            .modelContainer(sharedModelContainer)
+            .environment(FocusStore.shared)
+            .background(.regularMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        let controller = NSHostingController(rootView: view)
+        controller.view.wantsLayer = true
+        controller.view.layer?.backgroundColor = .clear
+
+        let window = FloatingPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 280),
+            styleMask: [.borderless, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.isMovableByWindowBackground = true
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.hasShadow = true
+        window.contentViewController = controller
+        window.isReleasedWhenClosed = false
+        return window
     }
 
     // MARK: - Edit modal
@@ -131,52 +290,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editWindow?.orderFrontRegardless()
     }
 
-    // MARK: - Pinned floating window
-
-    @objc func togglePinnedWindow() {
-        // If already pinned and visible, close it
-        if let existing = pinnedWindow, existing.isVisible {
-            existing.close()
-            pinnedWindow = nil
-            return
-        }
-
-        // Close the popover and create a floating always-on-top window
-        popover?.performClose(nil)
-
-        let view = MenuBarPopoverView(isPinned: true)
-            .modelContainer(sharedModelContainer)
-            .environment(FocusStore.shared)
-        let controller = NSHostingController(rootView: view)
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 280),
-            styleMask: [.titled, .closable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Focus Three"
-        window.level = .floating
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.isMovableByWindowBackground = true
-        window.titlebarAppearsTransparent = true
-        window.contentViewController = controller
-        window.isReleasedWhenClosed = false
-
-        // Position below the status bar button
-        if let button = statusItem?.button,
-           let buttonWindow = button.window {
-            let screenRect = buttonWindow.convertToScreen(button.frame)
-            window.setFrameTopLeftPoint(NSPoint(x: screenRect.minX,
-                                                y: screenRect.minY))
-        } else {
-            window.center()
-        }
-
-        pinnedWindow = window
-        window.orderFrontRegardless()
-    }
-
     // MARK: - Settings panel
 
     @objc func openSettingsPanel() {
@@ -193,5 +306,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settingsWindow = window
         }
         settingsWindow?.orderFrontRegardless()
+    }
+}
+
+// MARK: - NSPopoverDelegate
+
+extension AppDelegate: NSPopoverDelegate {
+    func popoverDidClose(_ notification: Notification) {
+        // Only remove the monitor if we're not already mid-drag
+        if case .draggingWindow = dragState { return }
+        removeDragMonitor()
     }
 }

@@ -90,6 +90,14 @@ final class FocusStore {
         try? context.save()
     }
 
+    /// Swap the order values of two top-3 items (used for popover drag-to-reorder).
+    func swapOrder(_ a: FocusItem, _ b: FocusItem, context: ModelContext) {
+        let temp = a.order
+        a.order = b.order
+        b.order = temp
+        try? context.save()
+    }
+
     // MARK: - Timer
 
     func startTimer(_ item: FocusItem, context: ModelContext) {
